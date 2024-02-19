@@ -13,86 +13,73 @@ See the Licence for the specific language governing permissions and limitations 
 import argparse
 import os
 import sys
+import time
 
 import numpy as np
+import scipy
 import xarray as xr
 
-
-def lmoments(values: np.ndarray) -> np.ndarray:
-    """
-    Compute first 2 L-moments of dataset (on first axis)
-    :param values: N-D array of values
-    :return: an estimate of the first two sample L-moments
-    """
-
-    nmoments = 3
-
-    # we need to have at least four values in order
-    # to make a sample L-moments estimation
-    nvalues = values.shape[0]
-    if nvalues < 4:
-        raise ValueError(
-            "Insufficient number of values to perform sample L-moments estimation"
-        )
-
-    # sort the values into ascending order
-    values = np.sort(values, axis=0)
-
-    sums = np.zeros((nmoments, *(values.shape[1:])))
-
-    for i in range(1, nvalues + 1):
-        z = i
-        term = values[i - 1]
-        sums[0] = sums[0] + term
-        for j in range(1, nmoments):
-            z -= 1
-            term = term * z
-            sums[j] = sums[j] + term
-
-    y = float(nvalues)
-    z = float(nvalues)
-    sums[0] = sums[0] / z
-    for j in range(1, nmoments):
-        y = y - 1.0
-        z = z * y
-        sums[j] = sums[j] / z
-
-    k = nmoments
-    p0 = -1.0
-    for _ in range(2):
-        ak = float(k)
-        p0 = -p0
-        p = p0
-        temp = p * sums[0]
-        for i in range(1, k):
-            ai = i
-            p = -p * (ak + ai - 1.0) * (ak - ai) / (ai * ai)
-            temp = temp + (p * sums[i])
-        sums[k - 1] = temp
-        k = k - 1
-
-    lmoments = np.zeros((2, *(values.shape[1:])))
-    lmoments[0] = sums[0]
-    lmoments[1] = sums[1]
-
-    return lmoments
+import lmoments
 
 
-def gumbel_parameters_moments(dis):
-    sigma = np.sqrt(6) * np.nanstd(dis, ddof=1, axis=0) / np.pi
-    mu = np.nanmean(dis, axis=0) - 0.5772 * sigma
-    return sigma, mu
+
+def distr_params_lmom(ds,distr):
+
+    l1, l2, l3 = lmoments.lmoments_new(ds)
+
+    res = dict()
+
+    if distr == "GEV":
+        
+        t3 = l3/l2
+        z = 2/(3+t3) - np.log(2)/np.log(3)
+        
+        k = 7.8590 * z + 2.9554 * np.square(z)    #shape
+        sigma = l2 * k / ((1 - np.exp2(-k)) * scipy.special.gamma(1+k))    #scale
+        mu = l1 + sigma * (scipy.special.gamma(1 + k) - 1) / k    #location
+
+        res['k'] = k
+        
+    elif distr == "Gumbel":
+
+        sigma = l2 / np.log(2)
+        mu = l1 - sigma * 0.5772
+
+    else:
+        print("Invalid distribution")
+        exit()
+    
+    res['sigma'] = sigma
+    res['mu'] = mu
+    
+    res['l1'] = l1
+    res['l2'] = l2
+    res['l3'] = l3
+
+    return res
 
 
-def gumbel_parameters_lmoments(dis):
-    lambda_coef = lmoments(dis)
-    sigma = lambda_coef[1] / np.log(2)
-    mu = lambda_coef[0] - sigma * 0.5772
-    return sigma, mu
 
+def inv_return_period(y, distr, params):
+    
+    if distr == "GEV":
+        k = params['k']
+        mu = params['mu']
+        sigma = params['sigma']
 
-def gumbel_function(y, sigma, mu):
-    return mu - sigma * np.log(np.log(y / (y - 1)))
+        x = mu + (sigma/k) * (1 - np.power(np.log(y/(y-1)),k))
+        
+    elif distr == "Gumbel":
+        mu = params['mu']
+        sigma = params['sigma']
+
+        x = mu - sigma * np.log(np.log(y/(y-1)))
+    else:
+        print("Invalid distribution")
+        exit()
+    
+    return x
+
 
 
 def find_main_var(ds, path):
@@ -106,11 +93,13 @@ def find_main_var(ds, path):
     return var_name
 
 
+
 def read_discharge(in_files):
     ds = xr.open_dataset(in_files)
     var = find_main_var(ds, in_files)
     da = ds[var]
     return da
+
 
 
 def unmask_array(mask, template, data):
@@ -120,41 +109,54 @@ def unmask_array(mask, template, data):
     return data_unmask
 
 
-def create_dataset(dis_max, return_periods, mask, thresholds, sigma, mu):
+
+def create_dataset(template,mask,thresholds,prec,params):
+    
     print("Creating dataset")
     ds_rp = xr.Dataset(
-        coords={"lat": dis_max.coords["lat"], "lon": dis_max.coords["lon"]}
+        #coords={"latitude": template.coords["latitude"], "longitude": template.coords["longitude"]}
+        coords={"lat": template.coords["lat"], "lon": template.coords["lon"]}
     )
-    for i, rp in enumerate(return_periods):
-        thres = unmask_array(mask, dis_max.isel(time=0).values, thresholds[i])
-        ds_rp[f"rl_{rp}"] = (["lat", "lon"], thres)
 
-    s = unmask_array(mask, dis_max.isel(time=0).values, sigma)
-    print(s.shape)
-    ds_rp[f"sigma"] = (["lat", "lon"], s)
-    m = unmask_array(mask, dis_max.isel(time=0).values, mu)
-    print(m.shape)
-    ds_rp[f"mu"] = (["lat", "lon"], m)
+    for i, rp in enumerate(thresholds):
+        p = unmask_array(mask, template.isel(time=0).values, prec[i])
+        #ds_rp[f"rp_{int(rp)}y"] = (["latitude", "longitude"], p)
+        ds_rp[f"rp_{int(rp)}y"] = (["lat", "lon"], p)
 
-    print(ds_rp)
+    for par in params:
+        v = unmask_array(mask, template.isel(time=0).values, params[par])
+        print(f"{par} shape: ",v.shape)
+        #ds_rp[f"{par}"] = (["latitude", "longitude"], v)
+        ds_rp[f"{par}"] = (["lat", "lon"], v)
+    
+    print('\nFinal dataset:\n',ds_rp)
 
     return ds_rp
 
 
-def compute_thresholds_gumbel(dis_max, return_periods):
+
+def compute_thresholds(dis_max,distribution,thresholds):
+
     mask = np.isfinite(dis_max.isel(time=0).values)
     dis_max_masked = dis_max.values[:, mask]
 
-    print("Computing Gumbel coefficients")
-    sigma, mu = gumbel_parameters_lmoments(dis_max_masked)
+    print("\n\n*** Computing distribution coefficients ***")
+    start = time.time()
+    params = distr_params_lmom(dis_max_masked,distr=distribution)
+    end = time.time() - start
+    print(f'Computation took {end:.1f} seconds\n')
 
-    print("Computing return periods")
-    thresholds = []
-    for y in return_periods:
-        dis = gumbel_function(y, sigma, mu)
-        thresholds.append(dis)
+    print("\n*** Computing return periods ***")
+    RES = []
+    start = time.time()
+    for y in thresholds:
+        dis = inv_return_period(y,distribution,params)
+        RES.append(dis)
+    end = time.time() - start
+    print(f'Computation took {end:.1f} seconds\n')
 
-    ds_rp = create_dataset(dis_max, return_periods, mask, thresholds, sigma, mu)
+    print("\n*** Store result in xarray dataset ***")
+    ds_rp = create_dataset(dis_max,mask,thresholds,RES,params)
 
     return ds_rp
 
@@ -167,23 +169,37 @@ def main(argv=sys.argv):
         using the method of L-moments.
         Thresholds computed: [1.5, 2, 5, 10, 20, 50, 100, 200, 500]
         """,
-        prog=prog,
-    )
-    parser.add_argument(
-        "-d", "--discharge", help="Input discharge files (annual maxima)"
-    )
-    parser.add_argument("-o", "--output", help="Output thresholds file")
-
+        prog=prog
+        )
+    parser.add_argument("-i", "--input",
+                        help="Input precipitation file (annual maxima)")
+    parser.add_argument("-o", "--output",
+                        help="Output thresholds file")
+    parser.add_argument("-d", "--distribution",
+                        choices=["GEV","Gumbel"], default="Gumbel",
+                        help="Probability distribution to fit")
+    parser.add_argument("-t", "--thresholds",
+                        default="1.5, 2, 5, 10, 20, 50, 100, 200, 500",
+                        help="Return period threshold")
+    
     args = parser.parse_args()
 
-    dis = read_discharge(args.discharge)
-    print(dis)
+    infile = read_discharge(args.input)
+    print(f'\nInput file:\n{infile}')
 
-    return_periods = np.array([1.5, 2, 5, 10, 20, 50, 100, 200, 500])
+    distr = args.distribution
+    print(f'\nUsing the {distr} distribution')
 
-    thresholds = compute_thresholds_gumbel(dis, return_periods)
+    thresholds_tmp = list(args.thresholds.split(","))
+    thresholds = [float(x) for x in thresholds_tmp]
+    print(f'\nReturn period thresholds:\n{thresholds}')
 
-    thresholds.to_netcdf(args.output)
+    prec_threshold = compute_thresholds(infile,distr,thresholds)
+
+    print("\n*** Save dataset to NetCDF ***")
+    prec_threshold.to_netcdf(args.output)
+
+    print("Done!")
 
 
 def main_script():

@@ -80,10 +80,14 @@ def create_dataset(tmpl, mask, params):
     ds = xr.Dataset(coords={"latitude": tmpl.coords["latitude"],
                             "longitude": tmpl.coords["longitude"]})
     
+    # ds = xr.Dataset(coords={"lat": tmpl.coords["lat"],
+    #                         "lon": tmpl.coords["lon"]})
+    
     for p in params.keys():
         v = unmask_array(mask, tmpl.isel(time=0).values, params[p])
         print(f"{p} shape: ",v.shape)
         ds[f"{p}"] = (["latitude", "longitude"], v)
+        # ds[f"{p}"] = (["lat", "lon"], v)
     
     print(f'\nOutput dataset:\n{ds}\n\n')
 

@@ -51,34 +51,47 @@ def unmask_array(mask, template, data):
 
 
 
-def create_dataset(var,times,mask,template):
+def create_dataset(var,mask,times,longitudes,latitudes,t_boundaries):
+
+    #Open template file and read lon, lat and time_bnds
+    TIMES = times
+    LNS = longitudes
+    LTS = latitudes
+    BNDS = t_boundaries
 
     #Create empty ds
-    LTS = template['latitude']
-    LNS = template['longitude']
-
-    tmp =np.empty((len(LTS.values),len(LNS.values),len(times.values)))
+    tmp =np.empty((len(TIMES.values),len(LTS.values),len(LNS.values)))
     #print(tmp.shape)
 
-    ds = xr.Dataset(coords={"latitude" : LTS,
-                            "longitude" : LNS,
-                            "time" : times},
-                    data_vars={'rp' : (['latitude','longitude','time'],tmp)}
+    ds = xr.Dataset(
+        data_vars={'rp' : (['time','latitude','longitude'],#['time','lat','lon']
+                           tmp,
+                           {'long_name' : 'Return period',
+                            'units' : 'years',
+                            '_FillValue' : np.nan,
+                            'missing_value' : np.nan
+                            }),
+                    'time_bnds' : BNDS
+                  },
+        coords={"time" : TIMES,
+                "longitude" : LNS, #"lon" : LNS,
+                "latitude" : LTS} #"lat" : LTS}
                     )
-    #print(ds)
+    print(ds)
     #print(var.shape)
 
-    for i, t in enumerate(times.values):
+    for i, t in enumerate(TIMES.values):
 
         #Unmask & reshape
-        var_um = unmask_array(mask,template.values,var[i])
+        var_um = unmask_array(mask,tmp[0,:,:],var[i])
         
         if i%1000 == 0:
             print(f'Working on time {t} (index {i})')
             print(f'RP raw shape: {var[i,...].shape}')
             print(f'RP shape after unmask: {var_um.shape}\n')
 
-        ds['rp'].loc[dict(latitude=LTS.values,longitude=LNS.values,time=t)] = var_um
+        ds['rp'].loc[dict(time=t,longitude=LNS.values,latitude=LTS.values)] = var_um
+        #ds['rp'].loc[dict(time=t,lon=LNS.values,lat=LTS.values)] = var_um
 
     return ds
 
@@ -88,10 +101,11 @@ def compute_return_period(prec,params,distr):
     
     #Mask NaN values
     mask = np.isfinite(prec.isel(time=0).values)
+    print('\nMask shape: ',mask.shape)
     
     #Exclude Nan
     prec_masked = prec.values[:,mask]    #Note the reshape!
-    print(f'\nPrec masked shape: {prec_masked.shape}')
+    print(f'Prec masked shape: {prec_masked.shape}')
     
     if distr == "GEV":
         k, sigma, mu = params['k'], params['sigma'], params['mu']
@@ -126,7 +140,7 @@ def compute_return_period(prec,params,distr):
         exit()
             
     print(f'\nReturn period shape: {rp.shape}')
-    return rp
+    return rp, mask
     
 
 
@@ -155,7 +169,18 @@ def main(argv=sys.argv):
     #Open the parameters file
     params = xr.open_dataset(args.params)
     print(f'\nParameters of the {distr} distribution:\n',params,'\n\n')
-        
+
+    # Read time, lons, lats and time_bnds form input
+    # (to be used in the output file)
+    tmpl = xr.open_dataset(args.input)
+
+    times = tmpl['time']
+    latitudes = tmpl['latitude'] #tmpl['lat']
+    longitudes = tmpl['longitude'] #tmpl['lon']
+    t_boundaries = tmpl['time_bnds']
+
+    tmpl.close()
+
     #Open the input file
     pr = read_precipitation(args.input)
     print('Input precipitation:\n',pr,'\n\n')
@@ -165,32 +190,27 @@ def main(argv=sys.argv):
     #Compute the return period
     print('*** Start computing the return period ***')
     start = time.time()
-    rp = compute_return_period(pr, params, distr)
+    rp, mask = compute_return_period(pr, params, distr)
     print('\n*** End computing the return period ***')
     print(f'Total elapsed time {time.time()-start:.1f} seconds\n\n')
 
     params.close()
+    del pr
         
     #Store results in NetCDF dataset
     print('Store the result\n')
-    times = pr['time']   #!!!
-    mask = np.isfinite(pr.isel(time=0).values)
-    templ = pr.isel(time=0)    #Read lats and lons form here
-
-    del pr
-
     start = time.time()
-    rp_ds = create_dataset(rp,times,mask,templ)
+    rp_ds = create_dataset(rp,mask,times,longitudes,latitudes,t_boundaries)
     print(f'Total elapsed time {time.time()-start:.1f} seconds\n\n')
+
+    del times, latitudes, longitudes, t_boundaries
 
     #Write to NetCDF
     print(f'Save results to file\n{args.output}')
     start = time.time()
-    rp_ds.to_netcdf(args.output)
+    rp_ds.to_netcdf(args.output,unlimited_dims=['time'])
     print(f'Total elapsed time {time.time()-start:.1f} seconds\n\n')
 
-    print('\n*** END ***')
-    print('***********')
     return
 
 
